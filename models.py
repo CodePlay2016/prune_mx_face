@@ -87,8 +87,8 @@ class AngleLinear(nn.Block):
         w = self.weight._data[0] # size=(Classnum,F) F=in_features Classnum=out_features
 
         ww = nd.L2Normalization(w)
-        xlen = x.square().sum(1,keepdims=True).sqrt() # size=B
-        wlen = ww.square().sum(1,keepdims=True).sqrt() # size=Classnum
+        xlen = x.norm(axis=1,keepdims=True) # size=B
+        wlen = ww.norm(axis=1,keepdims=True) # size=Classnum
 
         cos_theta = nd.dot(x,ww.T) # size=(B,Classnum)
         cos_theta = cos_theta / xlen.reshape(-1,1) / wlen.reshape(1,-1)
@@ -105,9 +105,9 @@ class AngleLinear(nn.Block):
             phi_theta = self.myphi(theta,self.m)
             phi_theta = phi_theta.clip(-1*self.m,1)
 
-        cos_theta = cos_theta * xlen.reshape(-1,1)
-        phi_theta = phi_theta * xlen.reshape(-1,1)
-        output = (cos_theta,phi_theta)
+        xcos_theta = cos_theta * xlen.reshape(-1,1)
+        xphi_theta = phi_theta * xlen.reshape(-1,1)
+        output = (xcos_theta,xphi_theta)
         return output # size=(B,Classnum,2)
 
     def myphi(self, x, m):
@@ -126,26 +126,17 @@ class AngleLoss(nn.Block):
 
     def forward(self, input, target):
         self.it += 1
-        cos_theta,phi_theta = input
-        target = target.view(-1,1) #size=(B,1)
+        xcos_theta,xphi_theta = input
+        # target = target.reshape(-1,1) #size=(B,1)
 
-        index = cos_theta.data * 0.0 #size=(B,Classnum)
-        index.scatter_(1,target.data.view(-1,1),1)
-        index = index.byte()
-        index = Variable(index)
+        batch_size = target.size# size = (B,classnum)
 
         self.lamb = max(self.LambdaMin,self.LambdaMax/(1+0.1*self.it ))
-        output = cos_theta * 1.0 #size=(B,Classnum)
-        output[index] -= cos_theta[index]*(1.0+0)/(1+self.lamb)
-        output[index] += phi_theta[index]*(1.0+0)/(1+self.lamb)
+        output = xcos_theta * 1.0 #size=(B,Classnum)
+        output[range(0,batch_size),target] -= xcos_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb)
+        output[range(0,batch_size),target] += xphi_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb)
 
-        logpt = F.log_softmax(output)
-        logpt = logpt.gather(1,target)
-        logpt = logpt.view(-1)
-        pt = Variable(logpt.data.exp())
-
-        loss = -1 * (1-pt)**self.gamma * logpt
-        loss = loss.mean()
+        loss = nd.softmax_cross_entropy(output, nd.cast(target,'float32')) # (B,Classnum)
 
         return loss
 
@@ -169,7 +160,7 @@ class Residual(nn.Block):
         super(Residual, self).__init__(**kwargs)
         self.same_shape = same_shape
         if not same_shape:
-            self.conv0 = gradcam.Conv2D(channels, kernel_size=3,
+            self.conv0 = gradcam.Conv2D(channels, kernel_size=3,# if no need to activations' gradient: change this to nn.Conv2D
                                     padding=1, strides=2)
             self.a0 = mPReLU(channels)
         self.conv1 = gradcam.Conv2D(channels, kernel_size=3,
@@ -223,8 +214,8 @@ class SphereNet20(nn.Block):
             if self.verbose:
                 print('Block %d output: %s'%(i+1, out.shape))
         return out
-    def initialize_(self,ctx,*args):
-        with open("/home/hfq/model_compress/sphereface_model/caffemodel.pkl","rb") as f:
+    def initialize_from(self,pkl_path,ctx,*args):
+        with open(pkl_path,"rb") as f:
             params = pickle.load(f)
         same_layer = map(str,[0,1,3,7])
         block_index = 0
@@ -261,18 +252,20 @@ class SphereNet20(nn.Block):
                 res_index += 1
         # print self.net
 
-def init_model():
+def init_model(pkl_path):
     mnet = SphereNet20()
-    mnet.initialize_(mx.gpu())
+    mnet.initialize_from(pkl_path, mx.gpu())
     train_data_loader, valid_data_loader, test_data_loader \
         = dataset.train_valid_test_loader("../pytorch-pruning/train", batch_size=16)
     mnet.feature=False
     for batch, label in valid_data_loader:
         batch = batch.as_in_context(mx.gpu())
+        label = label.as_in_context(mx.gpu())
         out = mnet(batch)
+        criterion = AngleLoss()
+        loss = criterion(out, label)
         break
     mnet.save_params("./spherenet_model")
-    print
     return mnet
 
 def load_model():
@@ -282,6 +275,7 @@ def load_model():
 
 
 if __name__ == "__main__":
-    mnet=init_model()
+    pkl_path = "/home/hfq/model_compress/sphereface_model/caffemodel.pkl"
+    mnet=init_model(pkl_path) #
     print(mnet)
     print(mnet)
