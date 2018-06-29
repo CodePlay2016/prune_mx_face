@@ -6,6 +6,42 @@ import mxnet.gluon.data as data
 import mxnet.ndarray as nd
 import matplotlib.pyplot as plt
 
+def train_loader(path, batch_size=32, num_workers=4):
+    normalize = transforms.Normalize(mean=0.5, std=0.25)
+    train_transforms = transforms.Compose([
+                                 transforms.Resize((96,112)),# W x H
+                                 transforms.RandomFlipLeftRight(),
+                                 transforms.ToTensor(),
+                                 normalize,
+                             ])
+
+    def my_train_transform(img, label):
+        return train_transforms(img), label
+
+    train_dataset = datasets.ImageFolderDataset(path, transform=my_train_transform)
+    num_train = len(train_dataset)
+    print("number of total examples is %d" % num_train)
+    train_loader = data.DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    print("number of batches for train, valid and test is %d"%(len(train_loader)))
+    return train_loader
+
+def LFW_test_loader(test_dir, target_dir):
+    normalize = transforms.Normalize(mean=0.5, std=0.25)
+    transform = transforms.Compose([
+                                 transforms.Resize((96,112)),
+                                 transforms.ToTensor(),
+                                 normalize,
+                             ])
+    def my_transform(img, label):
+        return transform(img), label
+    testset = datasets.ImageFolderDataset(test_dir, transform=my_transform)
+    targetset = datasets.ImageFolderDataset(target_dir, transform=my_transform)
+
+    test_loader = data.DataLoader(testset,batch_size=1)
+    target_loader = data.DataLoader(targetset,batch_size=1)
+    return test_loader, target_loader
+
 def train_valid_test_loader(path, train_valid_ratio=(0.8,0.1), batch_size=32, num_workers=4):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
@@ -46,22 +82,6 @@ def train_valid_test_loader(path, train_valid_ratio=(0.8,0.1), batch_size=32, nu
     print("number of batches for train, valid and test is %d, %d, %d"%(len(train_loader), len(valid_loader), len(test_loader)))
 
     return train_loader, valid_loader, test_loader
-
-def LFW_test_loader(test_dir, target_dir):
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    transform = transforms.Compose([
-                                 transforms.Resize((112,96)),
-                                 transforms.ToTensor(),
-                                 normalize,
-                             ])
-    def my_transform(img, label):
-        return transform(img), label
-    testset = datasets.ImageFolderDataset(test_dir, transform=my_transform)
-    targetset = datasets.ImageFolderDataset(target_dir, transform=my_transform)
-
-    test_loader = data.DataLoader(testset,batch_size=1)
-    target_loader = data.DataLoader(targetset,batch_size=1)
-    return test_loader, target_loader
 
 def prepare_data(data_dir, label_dir, new_dir):
     with open(label_dir, 'rt') as f:

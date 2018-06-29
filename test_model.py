@@ -103,30 +103,19 @@ def find_best_threshold(thresholds, predicts):
             best_threshold = threshold
     return best_threshold
 
-
-if __name__ == "__main__":
-    # test_lfw()
-    test_files = sorted(glob.glob('./test_lfw/test/*'))
-    target_files = sorted(glob.glob('./test_lfw/target/*'))
-
-    # my_acc, test_emb, target_emb = cal_my_acc(test_files,target_files)
-    # with open("same_pair_embeddings.pkl", 'wb') as f:
-    #     pickle.dump((test_emb,target_emb),f)
+def test_on_LFW(model):
     with open('/home1/LFW/pairs.txt', 'rt') as f:
         pairs_lines = f.readlines()[1:]
     sims = []
-
-    model = models.SphereNet20()
-    model.load_params("spherenet_model", ctx=mx.gpu())
-
-    normalize = transforms.Normalize(mean=0.5, std=0.5)
+    model.get_feature=True
+    normalize = transforms.Normalize(mean=0.5, std=0.25)
     transform = transforms.Compose([
         transforms.Resize((96, 112)),
         transforms.ToTensor(),
         normalize,
         # mTransform,
     ])
-    start = time.time()
+    # start = time.time()
 
     for i in range(6000):
         p = pairs_lines[i].replace('\n', '').split('\t')
@@ -154,8 +143,8 @@ if __name__ == "__main__":
         cosdistance = nd.sum(f1 * f2) / (f1.norm() * f2.norm() + 1e-5)
         sims.append('{}\t{}\t{}\t{}\n'.format(name1, name2, cosdistance.asscalar(), sameflag))
 
-    cost = time.time() - start
-    print cost
+    # cost = time.time() - start # single 1080Ti about 100s
+    # print cost
 
     accuracy = []
     thd = []
@@ -168,5 +157,13 @@ if __name__ == "__main__":
         best_thresh = find_best_threshold(thresholds, predicts[train])
         accuracy.append(eval_acc(best_thresh, predicts[test]))
         thd.append(best_thresh)
-    print time.time() - start-cost
+    # print time.time() - start-cost # single 1080Ti about 100s
     print('LFWACC={:.4f} std={:.4f} thd={:.4f}'.format(np.mean(accuracy), np.std(accuracy), np.mean(thd)))
+
+    return np.mean(accuracy)
+
+
+if __name__ == "__main__":
+    model = models.SphereNet20()
+    model.load_params("./log/model", ctx=mx.gpu())
+    test_on_LFW(model)

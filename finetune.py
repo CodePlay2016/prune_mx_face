@@ -7,7 +7,7 @@ from prune_once import *
 import argparse
 from operator import itemgetter
 from heapq import nsmallest
-import time,pickle
+import time,pickle, threading
 
 import mxnet.gluon as gluon
 import mxnet.gluon.nn as nn
@@ -15,6 +15,7 @@ import mxnet as mx
 from mxnet import autograd
 
 import models
+from test_model import test_on_LFW
 
 import gradcam
 # reference: https://github.com/apache/incubator-mxnet/blob/master/example/cnn_visualization/gradcam.py
@@ -98,76 +99,44 @@ class FilterPrunner:
 
 class PrunningFineTuner_VGG16:
     def __init__(self, train_path, model, log_dir=None, ctx=mx.cpu()):
-        self.train_data_loader, self.valid_data_loader, self.test_data_loader\
-            = dataset.train_valid_test_loader(train_path,batch_size=16)
+        self.train_data_loader = dataset.train_loader(train_path,batch_size=128)
         self.model = model
         self.ctx = ctx
-        self.criterion = gluon.loss.SoftmaxCrossEntropyLoss()
+        self.criterion = models.AngleLoss()
         self.log_dir = log_dir
         self.p = Printer(log_dir)
         self.model_save_path = os.path.join(self.log_dir, "model")
         self.model_saved = False
         self.device_id = 6
 
+    def eval(self):
+        return test_on_LFW(self.model)
 
-    def eval(self, data_loader):
-        correct = 0
-        total = 0
-        for i, (batch, label) in enumerate(data_loader):
-            batch = batch.as_in_context(self.ctx)
-            label = label.as_in_context(self.ctx)
-            output = self.model(batch)
-            pred = output.argmax(1).astype(np.int64)
-            correct += mx.nd.equal(pred, label).sum()
-            total += label.size
-        acc = float(correct.asscalar()) / total
-        return acc
-
-    def test(self):
-        acc = self.eval(self.test_data_loader)
-        self.p.log("Test Accuracy :%.4f" % (acc))
-        return acc
-
-    def eval_train(self):
-        acc = self.eval(self.train_data_loader)
-        self.p.log("\ntrain accuracy :%.4f" % acc)
-        return acc
-
-    def valid_train(self):
-        acc = self.eval(self.valid_data_loader)
-        self.p.log("valid Accuracy :%.4f" % acc)
-        return acc
-
-    def train(self, optimizer=None, epoches=10,
+    def train(self, trainer=None, epoches=10,
               save_highest=True, eval_train_acc=False, best_acc=0):
-        if optimizer is None:
-            optimizer = \
-                mx.optimizer.Adam(0.0001)
-        trainer = gluon.Trainer(self.model.collect_params(), optimizer)
+        if trainer is None:
+            optimizer = mx.optimizer.Adam(0.0001)
+            trainer = gluon.Trainer(self.model.classifier.collect_params(), optimizer)
 
         # self.get_cuda_memory("before training ")
-        best_epoch = 0
+        best_loss = 1e5
         for i in range(epoches):
             self.p.log("\nEpoch: %d" % (i+1))
             start = time.time()
             self.get_cuda_memory()
+            self.model.get_feature=False # whether to drop the last layer
             train_loss = self.train_epoch(trainer)
             self.p.log("train loss is %.4f"%train_loss)
             train_time = time.time() - start
-            if eval_train_acc:
-                self.eval_train(self.train_data_loader)
-            train_eval_time = time.time() - start - train_time
-            valid_acc = self.valid_train()
             self.get_cuda_memory()
-            if best_acc < valid_acc:
-                best_acc = valid_acc
+            if best_loss > train_loss:
+                best_acc = train_loss
                 if save_highest:
-                    best_epoch = i
                     self.model.save_params(self.model_save_path)
                     self.model_saved = True
                     self.p.log("model resaved...")
-            self.p.log("train step time elaps: %.2fs, train_acc eval time elaps: %.2fs, total time elaps: %.2fs" % (
-                train_time, train_eval_time, time.time()-start))
+            self.p.log("train step time elaps: %.2fs, total time elaps: %.2fs" % (
+                train_time, time.time()-start))
             # self.get_cuda_memory("Fine tuning cuda memory is:")
         if save_highest and self.model_saved:
             self.p.log("model reloaded...")
@@ -175,38 +144,45 @@ class PrunningFineTuner_VGG16:
             self.model_saved = False
         else:
             self.model.save_params(self.model_save_path)
+        self.eval()
         self.p.log("Finished fine tuning. best valid acc is %.4f" % best_acc)
 
     def train_batch(self, trainer, batch, label, rank_filters):
         if rank_filters:
             self.prunner.forward(batch, label,
-                                 self.criterion)  # 1800MB -> 3300MB
+                                 self.criterion)
         else:
-            self.model.set_prune(True)
             with autograd.record():
                 loss=self.criterion(self.model(batch), label)
             loss.backward()
-            trainer.step(batch.shape[0])
             return loss
 
     def train_epoch(self, trainer=None, rank_filters=False):
         cumulative_train_loss = mx.nd.zeros(1, ctx=mx.cpu())
         train_samples = 0
-        dataloader = self.valid_data_loader if rank_filters else self.train_data_loader
-        for batch, label in dataloader:
-            batch = batch.as_in_context(ctx)
-            label = label.as_in_context(ctx)
-            loss = self.train_batch(trainer, batch, label, rank_filters)
-            # one_loss = mx.nd.zeros(1, ctx=mx.cpu())
-            # batches = gluon.utils.split_and_load(batch,ctx)
-            # labels = gluon.utils.split_and_load(label,ctx)
-            # losses = [self.train_batch(trainer, sbatch, slabel, rank_filters)\
-            #         for sbatch in batches for slabel in labels]
+        start = time.time()
+        for ii, (batch, label) in enumerate(self.train_data_loader):
+            if not isinstance(ctx, list):
+                batch = batch.as_in_context(ctx)
+                label = label.as_in_context(ctx)
+                loss = self.train_batch(trainer, batch, label, rank_filters)
+            else:
+                one_loss = mx.nd.zeros(1, ctx=mx.cpu())
+                batches = gluon.utils.split_and_load(batch,ctx)
+                labels = gluon.utils.split_and_load(label,ctx)
+                losses = [self.train_batch(trainer, sbatch, slabel, rank_filters)\
+                        for sbatch, slabel in zip(batches,labels)]
+            if ii % 500 == 0 and ii:
+                print ii, time.time() - start,cumulative_train_loss.asscalar()/train_samples, "||",
+                start = time.time()
             if not rank_filters:
-                # trainer.step(batch.shape[0])
-                # for loss in losses:
-                #     one_loss += loss.as_in_context(mx.cpu())
-                cumulative_train_loss += loss.as_in_context(mx.cpu()).sum()
+                trainer.step(batch.shape[0],ignore_stale_grad=True)
+                if isinstance(ctx, list):
+                    for loss in losses:
+                        one_loss += loss.as_in_context(mx.cpu())
+                    cumulative_train_loss += one_loss.sum()
+                else:
+                    cumulative_train_loss += loss.as_in_context(mx.cpu()).sum()
             train_samples += batch.shape[0]
             mx.ndarray.waitall()
         return cumulative_train_loss.asscalar()/train_samples # total loss
@@ -302,34 +278,44 @@ class PrunningFineTuner_VGG16:
             self.p.log("#"*80)
             self.p.log("Fine tuning to recover from prunning iteration.")
             optimizer = mx.optimizer.Adam(0.0001)
-            self.train(optimizer, epoches=5, best_acc = cur_acc)
-            cur_acc = self.test()
+            trainer = gluon.Trainer(self.model.collect_params(),optimizer)
+            self.train(trainer, epoches=5, best_acc = cur_acc)
+            cur_acc = self.eval()
 
         self.p.log("#"*80)
         self.p.log("Finished. Going to fine tune the model a bit more")
         self.reload_model()
         optimizer = mx.optimizer.Adam(0.0001)
-        self.train(optimizer, epoches=10, best_acc=cur_acc)
-        self.test()
+        trainer = gluon.Trainer(self.model.classifier.collect_params(),optimizer)
+        self.train(trainer, epoches=10, best_acc=cur_acc)
+        self.eval()
         self.model.save_params(os.path.join(self.log_dir, "model_pruned"))
         return self.model
 
+class myThread(threading.Thread):
+    def __init__(self, threadID, name, counter):
+        threading.Thread.__init__(self)
+        self.threadID = threadID
+        self.name = name
+        self.counter = counter
+
+    def run(self, sbatch, slabel):
+        pass
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", dest="train", action="store_true")
     parser.add_argument("--prune", dest="prune", action="store_true")
     parser.add_argument("--no-log", dest="log", action="store_false")
-    parser.add_argument("--train_path", type=str, default="../pytorch-pruning/train")
+    parser.add_argument("--train_path", type=str, default="/home1/CASIA-WebFace/aligned_Webface-112X96")
     parser.add_argument("--model_path", type=str,
                         default="./log/train-2018-06-14_131152/model")
-    parser.add_argument("--device_id", type=int, default=6)
-    parser.set_defaults(train=False)
-    parser.set_defaults(prune=True)
-    parser.set_defaults(log=False)
+    parser.add_argument("--device_id", type=int, default=5)
+    parser.set_defaults(train=True)
+    parser.set_defaults(prune=False)
+    parser.set_defaults(log=True)
     args = parser.parse_args()
     return args
-
 
 class Printer():
     def __init__(self, log_dir, log=True):
@@ -346,23 +332,24 @@ class Printer():
             with open(os.path.join(self.log_dir, "log.txt"), "a") as f:
                 f.write(str(mstr)+"\n")
 
-
 if __name__ == '__main__':
     args = get_args()
 
-    # gpus = [0,1,2,3]
+    # gpus = [0,1,2,3,4,5,6,7]
     # ctx = [mx.gpu(ii) for ii in gpus]
     ctx = mx.gpu(6)
     time_info = time.strftime('%Y-%m-%d_%H%M%S', time.localtime(time.time()))
     log_dir = os.path.abspath("./log/")
     if args.train:
-        model = models.ModifiedVGG16Model(ctx=ctx, pretrained=True)
+        model = models.SphereNet20()
+        model.load_params('spherenet_model', ctx=ctx)
         if args.log: log_dir = os.path.abspath("./log/train-"+time_info+"/")
     elif args.prune:
-        model = models.ModifiedVGG16Model(ctx=ctx)
+        model = models.SphereNet20()
         model.load_params(args.model_path, ctx=ctx)
         if args.log: log_dir = os.path.abspath("./log/prune-"+time_info+"/")
     p = Printer(log_dir, args.log)
+    p.log(ctx)
     msg = "doing fine tuning(train)" if args.train else "doing pruning, using model " + \
         args.model_path
     p.log(msg)

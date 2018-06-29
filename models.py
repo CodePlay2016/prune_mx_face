@@ -61,8 +61,6 @@ class ModifiedVGG16Model(gluon.Block):
     def set_prune(self, prune):
         self.prune = prune
 
-
-
 class AngleLinear(nn.Block):
     def __init__(self, units, in_units=0,
                  m = 4, phiflag=True, **kwargs):
@@ -87,12 +85,10 @@ class AngleLinear(nn.Block):
         w = self.weight._data[0] # size=(Classnum,F) F=in_features Classnum=out_features
 
         ww = nd.L2Normalization(w)
-        xlen = x.norm(axis=1,keepdims=True) # size=B
-        wlen = ww.norm(axis=1,keepdims=True) # size=Classnum
+        xlen = x.square().sum(axis=1,keepdims=True).sqrt() # size=B
+        wlen = ww.square().sum(axis=1,keepdims=True).sqrt() # size=Classnum
 
-        cos_theta = nd.dot(x,ww.T) # size=(B,Classnum)
-        cos_theta = cos_theta / xlen.reshape(-1,1) / wlen.reshape(1,-1)
-        cos_theta = cos_theta.clip(-1,1)
+        cos_theta = nd.dot(x,ww.T)/ xlen.reshape(-1,1) / wlen.reshape(1,-1).clip(-1,1) # size=(B,Classnum)
 
         if self.phiflag:
             cos_m_theta = self.mlambda[self.m](cos_theta)
@@ -127,16 +123,16 @@ class AngleLoss(nn.Block):
     def forward(self, input, target):
         self.it += 1
         xcos_theta,xphi_theta = input
-        # target = target.reshape(-1,1) #size=(B,1)
 
         batch_size = target.size# size = (B,classnum)
 
         self.lamb = max(self.LambdaMin,self.LambdaMax/(1+0.1*self.it ))
-        output = xcos_theta * 1.0 #size=(B,Classnum)
-        output[range(0,batch_size),target] -= xcos_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb)
-        output[range(0,batch_size),target] += xphi_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb)
+        # output = xcos_theta * 1.0 #size=(B,Classnum)
+        # output[range(0,batch_size),target] =  output[range(0,batch_size),target] - \
+        #                                       xcos_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb) + \
+        #                                       xphi_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb)
 
-        loss = nd.softmax_cross_entropy(output, nd.cast(target,'float32')) # (B,Classnum)
+        loss = nd.softmax_cross_entropy(xcos_theta, nd.cast(target,'float32')) # (B,Classnum)
 
         return loss
 
@@ -177,17 +173,16 @@ class Residual(nn.Block):
         out = self.a2(self.conv2(out))
         return out + x
 
-
 class SphereNet20(nn.Block):
     # http://ethereon.github.io/netscope/#/gist/20f6ddf70a35dec5019a539a502bccc5
     def __init__(self, num_classes=10574, verbose=False, **kwargs):
         super(SphereNet20, self).__init__(**kwargs)
         self.verbose = verbose
-        self.feature = True
+        self.get_feature = True
         # add name_scope on the outermost Sequential
         with self.name_scope():
             # block 1
-            self.net = nn.Sequential()
+            self.features = nn.Sequential()
             b1 = Residual(64, same_shape=False)
 
             # block 2
@@ -204,15 +199,17 @@ class SphereNet20(nn.Block):
             b4 = Residual(512, same_shape=False)
             f5 = nn.Dense(512)
             f6 = AngleLinear(in_units=512,units=num_classes)
-            self.net.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5,f6)
+            self.features.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5)
+            self.classifier = f6
 
     def forward(self, x):
         out = x
-        for i, b in enumerate(self.net):
-            if self.feature and i==9: break
+        for i, b in enumerate(self.features):
             out = b(out)
             if self.verbose:
                 print('Block %d output: %s'%(i+1, out.shape))
+        if not self.get_feature:
+            out = self.classifier(out)
         return out
     def initialize_from(self,pkl_path,ctx,*args):
         with open(pkl_path,"rb") as f:
@@ -220,12 +217,10 @@ class SphereNet20(nn.Block):
         same_layer = map(str,[0,1,3,7])
         block_index = 0
         res_index = 1
-        for name, resblock in self.net._children.items():
+        for name, resblock in self.features._children.items():
             if name == "8":
                 resblock.initialize(init=myInitializer(params['fc5.weight']),ctx=ctx)
                 resblock.bias.initialize(init=mx.init.Constant(params['fc5.bias']),force_reinit=True,ctx=ctx)
-            elif name == "9":
-                resblock.initialize(ctx=ctx)
             else:
                 if name in same_layer:
                     block_index += 1
@@ -236,7 +231,6 @@ class SphereNet20(nn.Block):
                     print 'conv%d_%d.weight'%(block_index,res_index)
                     resblock.a0.initialize(init=mx.init.Constant(params['relu%d_%d'%(block_index,res_index)][0].reshape([1,-1,1,1])),
                                        force_reinit=True, ctx=ctx)
-
                     res_index += 1
                 resblock.conv1.initialize(init=myInitializer(params['conv%d_%d.weight'%(block_index,res_index)],
                                                              params['conv%d_%d.bias'%(block_index,res_index)]),ctx=ctx)
@@ -250,7 +244,7 @@ class SphereNet20(nn.Block):
                                        force_reinit=True,  ctx=ctx)
                 print 'conv%d_%d.weight'%(block_index,res_index)
                 res_index += 1
-        # print self.net
+        self.classifier.initialize(ctx=ctx)
 
 def init_model(pkl_path):
     mnet = SphereNet20()
@@ -261,6 +255,7 @@ def init_model(pkl_path):
     for batch, label in valid_data_loader:
         batch = batch.as_in_context(mx.gpu())
         label = label.as_in_context(mx.gpu())
+        mnet.get_feature=False
         out = mnet(batch)
         criterion = AngleLoss()
         loss = criterion(out, label)
@@ -269,7 +264,7 @@ def init_model(pkl_path):
     return mnet
 
 def load_model():
-    mnet = SphereNet20(100)
+    mnet = SphereNet20()
     mnet.load_params("./spherenet_model")
     return mnet
 
@@ -277,5 +272,6 @@ def load_model():
 if __name__ == "__main__":
     pkl_path = "/home/hfq/model_compress/sphereface_model/caffemodel.pkl"
     mnet=init_model(pkl_path) #
-    print(mnet)
+    # mnet = SphereNet20()
+    # mnet.load_params('spherenet_model',ctx=mx.gpu())
     print(mnet)
