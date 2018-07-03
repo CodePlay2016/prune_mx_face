@@ -1,5 +1,6 @@
 import mxnet.gluon.nn as nn
 import mxnet.gluon as gluon
+from mxnet.gluon import HybridBlock
 from mxnet import nd
 from mxnet.gluon.model_zoo import vision
 import mxnet as mx
@@ -61,7 +62,7 @@ class ModifiedVGG16Model(gluon.Block):
     def set_prune(self, prune):
         self.prune = prune
 
-class AngleLinear(nn.Block):
+class AngleLinear(HybridBlock):
     def __init__(self, units, in_units=0,
                  m = 4, phiflag=True, **kwargs):
         super(AngleLinear, self).__init__(**kwargs)
@@ -71,7 +72,7 @@ class AngleLinear(nn.Block):
                                       init=mx.init.Constant(weight),allow_deferred_init=True)
         self.phiflag = phiflag
         self.m = m
-        self.mlambda = [ # m-order taylor expansion
+        self.mlambda = [ # given cos_x, calculate the cos_mx
             lambda x: x**0,
             lambda x: x**1,
             lambda x: 2*x**2-1,
@@ -80,9 +81,10 @@ class AngleLinear(nn.Block):
             lambda x: 16*x**5-20*x**3+5*x
         ]
 
-    def forward(self, input):
-        x = input   # size=(B,F)    F is feature len
+    def hybrid_forward(self, F, x, *args, **params):
+        # xsize=(B,F)    F is feature len
         w = self.weight._data[0] # size=(Classnum,F) F=in_features Classnum=out_features
+
 
         ww = nd.L2Normalization(w)
         xlen = x.square().sum(axis=1,keepdims=True).sqrt() # size=B
@@ -111,32 +113,30 @@ class AngleLinear(nn.Block):
         return 1 - x ** 2 / math.factorial(2) + x ** 4 / math.factorial(4) - x ** 6 / math.factorial(6) + \
                x ** 8 / math.factorial(8) - x ** 9 / math.factorial(9)
 
-class AngleLoss(nn.Block):
-    def __init__(self, gamma=0):
-        super(AngleLoss, self).__init__()
+class AngleLoss(gluon.loss.Loss):
+    def __init__(self, weight=1, batch_axis=0, gamma=0, **kwargs):
+        super(AngleLoss, self).__init__(weight, batch_axis, **kwargs)
         self.gamma   = gamma
         self.it = 0
         self.LambdaMin = 5.0
         self.LambdaMax = 1500.0
         self.lamb = 1500.0
 
-    def forward(self, input, target):
+    def hybrid_forward(self, F, xcos_theta,xphi_theta,target):
         self.it += 1
-        xcos_theta,xphi_theta = input
 
         batch_size = target.size# size = (B,classnum)
+        oh_target = target.one_hot(xcos_theta.shape[1])
 
         self.lamb = max(self.LambdaMin,self.LambdaMax/(1+0.1*self.it ))
-        # output = xcos_theta * 1.0 #size=(B,Classnum)
-        # output[range(0,batch_size),target] =  output[range(0,batch_size),target] - \
-        #                                       xcos_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb) + \
-        #                                       xphi_theta[range(0,batch_size),target]*(1.0+0)/(1+self.lamb)
+        # because indexing is not differentiable in mxnet, we must do this
+        output =  xcos_theta - oh_target * xcos_theta[range(0,batch_size),target].reshape(-1,1)*(1.0+0)/(1+self.lamb) +\
+                                oh_target * xphi_theta[range(0,batch_size),target].reshape(-1,1)*(1.0+0)/(1+self.lamb)
 
-        loss = nd.softmax_cross_entropy(xcos_theta, nd.cast(target,'float32')) # (B,Classnum)
-
+        loss = nd.softmax_cross_entropy(output, nd.cast(target,'float32')) # (B,Classnum)
         return loss
 
-class mPReLU(nn.HybridBlock):
+class mPReLU(HybridBlock):
     '''
     modify
      the official prelu
@@ -151,7 +151,7 @@ class mPReLU(nn.HybridBlock):
     def hybrid_forward(self, F, x, alpha):
         return mx.nd.maximum(x,0)+ mx.nd.minimum(alpha*x,0)
 
-class Residual(nn.Block):
+class Residual(HybridBlock):
     def __init__(self, channels, same_shape=True, **kwargs):
         super(Residual, self).__init__(**kwargs)
         self.same_shape = same_shape
@@ -166,14 +166,14 @@ class Residual(nn.Block):
                                     padding=1)
         self.a2 = mPReLU(channels)
 
-    def forward(self, x):
+    def hybrid_forward(self, F, x, *args, **kwargs):
         if not self.same_shape:
             x = self.a0(self.conv0(x))
         out = self.a1(self.conv1(x))
         out = self.a2(self.conv2(out))
         return out + x
 
-class SphereNet20(nn.Block):
+class SphereNet20(HybridBlock):
     # http://ethereon.github.io/netscope/#/gist/20f6ddf70a35dec5019a539a502bccc5
     def __init__(self, num_classes=10574, verbose=False, **kwargs):
         super(SphereNet20, self).__init__(**kwargs)
@@ -182,7 +182,7 @@ class SphereNet20(nn.Block):
         # add name_scope on the outermost Sequential
         with self.name_scope():
             # block 1
-            self.features = nn.Sequential()
+            self.features = nn.HybridSequential()
             b1 = Residual(64, same_shape=False)
 
             # block 2
@@ -202,7 +202,7 @@ class SphereNet20(nn.Block):
             self.features.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5)
             self.classifier = f6
 
-    def forward(self, x):
+    def hybrid_forward(self, F,x,  *args, **kwargs):
         out = x
         for i, b in enumerate(self.features):
             out = b(out)
@@ -258,7 +258,7 @@ def init_model(pkl_path):
         mnet.get_feature=False
         out = mnet(batch)
         criterion = AngleLoss()
-        loss = criterion(out, label)
+        loss = criterion(out[0],out[1],label)
         break
     mnet.save_params("./spherenet_model")
     return mnet

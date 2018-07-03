@@ -43,17 +43,15 @@ def LFW_test_loader(test_dir, target_dir):
     return test_loader, target_loader
 
 def train_valid_test_loader(path, train_valid_ratio=(0.8,0.1), batch_size=32, num_workers=4):
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
+    normalize = transforms.Normalize(mean=0.5, std=0.25)
     train_transforms = transforms.Compose([
-                                 transforms.Resize((256,256)),
-                                 transforms.RandomResizedCrop(224),
+                                 transforms.Resize((96,112)),
                                  transforms.RandomFlipLeftRight(),
                                  transforms.ToTensor(),
                                  normalize,
                              ])
     untrain_transforms = transforms.Compose([
-                                 transforms.Resize((112,96)),
+                                 transforms.Resize((96,112)),
                                  transforms.ToTensor(),
                                  normalize,
                              ])

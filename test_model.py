@@ -103,7 +103,7 @@ def find_best_threshold(thresholds, predicts):
             best_threshold = threshold
     return best_threshold
 
-def test_on_LFW(model):
+def test_on_LFW(model,ctx=mx.gpu()):
     with open('/home1/LFW/pairs.txt', 'rt') as f:
         pairs_lines = f.readlines()[1:]
     sims = []
@@ -115,12 +115,9 @@ def test_on_LFW(model):
         normalize,
         # mTransform,
     ])
-    # start = time.time()
 
     for i in range(6000):
         p = pairs_lines[i].replace('\n', '').split('\t')
-
-        if i % 200 == 0: print i,
 
         if 3 == len(p):
             sameflag = 1
@@ -133,27 +130,23 @@ def test_on_LFW(model):
 
         img1 = nd.array(Image.open('/home1/LFW/aligned_lfw-112X96/' + name1))
         img2 = nd.array(Image.open('/home1/LFW/aligned_lfw-112X96/' + name2))
-
-        img1 = transform(img1).as_in_context(mx.gpu())
-        img2 = transform(img2).as_in_context(mx.gpu())
+        img1 = transform(img1)
+        img2 = transform(img2)
         img = nd.stack(img1, img2)
 
+        img = img.as_in_context(ctx)
         output = model(img)
         f1, f2 = output[0], output[1]
         cosdistance = nd.sum(f1 * f2) / (f1.norm() * f2.norm() + 1e-5)
         sims.append('{}\t{}\t{}\t{}\n'.format(name1, name2, cosdistance.asscalar(), sameflag))
 
-    # cost = time.time() - start # single 1080Ti about 100s
-    # print cost
-
     accuracy = []
     thd = []
     folds = KFold(n=6000, n_folds=10, shuffle=False)
-    thresholds = np.arange(-1.0, 1.0, 0.005)
+    thresholds = np.arange(0, 1.0, 0.005)
     predicts = np.array(map(lambda line: line.strip('\n').split(), sims))
 
     for idx, (train, test) in enumerate(folds):
-        print idx
         best_thresh = find_best_threshold(thresholds, predicts[train])
         accuracy.append(eval_acc(best_thresh, predicts[test]))
         thd.append(best_thresh)
@@ -165,5 +158,10 @@ def test_on_LFW(model):
 
 if __name__ == "__main__":
     model = models.SphereNet20()
-    model.load_params("./log/model", ctx=mx.gpu())
+    # gpus = [0,1]
+    # ctx = [mx.gpu(ii) for ii in gpus]
+    ctx = mx.gpu()
+    model.load_params("/home/hfq/model_compress/prune/1611.06440/prune_mx_face/spherenet_model", ctx=ctx)
+    start = time.time()
     test_on_LFW(model)
+    print time.time()-start

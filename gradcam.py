@@ -181,7 +181,7 @@ def _get_grad(net, image, label, criterion=None, conv_layer_name=None, image_gra
     with autograd.record(train_mode=False):
         out = net(image)
         if criterion is not None:
-            out = criterion(out, label)
+            out = criterion(out[0],out[1], label)
 
     # If user didn't provide a class id, we'll use the class that the network predicted
     # if class_id == None:
@@ -194,7 +194,7 @@ def _get_grad(net, image, label, criterion=None, conv_layer_name=None, image_gra
     if criterion is None:
         out.backward(label, train_mode=False)
     else:
-        out.backward(retain_graph=True,train_mode=False)
+        out.backward(retain_graph=False,train_mode=False)
 
     if image_grad:
         return image.grad[0].asnumpy()
