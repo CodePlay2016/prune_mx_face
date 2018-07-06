@@ -152,7 +152,7 @@ class mPReLU(HybridBlock):
         return mx.nd.maximum(x,0)+ mx.nd.minimum(alpha*x,0)
 
 class Residual(HybridBlock):
-    def __init__(self, channels, same_shape=True, **kwargs):
+    def __init__(self, channels=64, same_shape=True, **kwargs):
         super(Residual, self).__init__(**kwargs)
         self.same_shape = same_shape
         if not same_shape:
@@ -206,6 +206,7 @@ class SphereNet20(HybridBlock):
         out = x
         for i, b in enumerate(self.features):
             out = b(out)
+
             if self.verbose:
                 print('Block %d output: %s'%(i+1, out.shape))
         if not self.get_feature:

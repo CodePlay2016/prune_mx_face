@@ -9,90 +9,106 @@ import numpy as np
 from models import *
 from finetune import *
 
-def replace_layers(model, index, layer):
-    new_model = mx.gluon.nn.HybridSequential()
-    for ii,_ in enumerate(model):
-        if ii == index:
-            new_model.add(layer)
-        else:
-            new_model.add(model[ii])
-    return new_model
-
 def prune_spherenet20_conv_once(model, prune_targets,ctx):
 
-    new_feature = nn.Sequential()
-    res_heads = [0,3,8,17]
+    new_feature = nn.HybridSequential()
 
-    last_conv_pruned = False
-    prune_target = None
-    index = 0
-    for _, module in model.features._children.items():
-        if isinstance(module, nn.Dense): continue
-        for _, layer in module._children.items():
-            if index in prune_targets.keys():
-                new_layer = gradcam.Conv2D(channels=layer.conv._kwargs["num_filter"]-len(prune_targets[index]),
-                                           kernel_size=layer.conv._kwargs["kernel"],
-                                           strides=layer.conv._kwargs["stride"],
-                                           padding=layer.conv._kwargs["pad"],
-                                           dilation=layer.conv._kwargs["dilate"],
-                                           groups=layer.conv._kwargs["num_group"])
-                old_weight = layer.conv.weight._data[0]
+    last_index = 0
+    for name, module in model.features._children.items():
+        if isinstance(module, nn.Dense):
+            old_weight = module.weight._data[0]
+            params_per_input_channel = old_weight.shape[1] / model.features._children['7'].conv2.conv._channels
+            filter_index = [ii for ii in range(old_weight.shape[0]) if ii not in prune_targets[last_index-1]]
+            new_Dense = \
+                nn.Dense(module._units, in_units=params_per_input_channel * len(filter_index))
+            new_weight_index = [jj for ii in filter_index for jj in range(ii * params_per_input_channel,
+                                                                          (ii + 1) * params_per_input_channel)]
+            new_weights = \
+                old_weight[:, new_weight_index]
+            new_bias = module.bias._data[0]
+            new_Dense.initialize(init=myInitializer(new_weights), ctx=ctx)
+            new_Dense.bias.initialize(init=mx.init.Constant(new_bias),force_reinit=True, ctx=ctx)
+            new_feature.add(new_Dense)
+        else:
+            new_block, last_index, prune_targets = prune_resblock(module,prune_targets,last_index,ctx)
+            new_feature.add(new_block)
 
-                if last_conv_pruned:
-                    filter_index = [ii for ii in range(old_weight.shape[1]) if ii not in prune_target]
-                    old_weight = old_weight[:,filter_index,:,:]
-
-                prune_target = prune_targets[index]
-                filter_index = [ii for ii in range(old_weight.shape[0]) if ii not in prune_target]
-                new_weight = old_weight[filter_index,:,:,:]
-                new_bias   = layer.conv.bias._data[0][filter_index]
-                new_layer.conv.initialize(init=myInitializer(new_weight, new_bias), ctx=ctx)
-                last_conv_pruned = True
-                if index == 28: # if the last conv layer
-                    first_dense = model.classifier._children["1"]
-                    old_weight = first_dense.weight._data[0]
-                    params_per_input_channel = old_weight.shape[1] / layer.conv._channels
-                    new_Dense = \
-                        nn.Dense(first_dense._units, in_units=params_per_input_channel * len(filter_index))
-                    new_weight_index = [jj for ii in filter_index for jj in range(ii * params_per_input_channel,
-                                                                                  (ii + 1) * params_per_input_channel)]
-                    new_weights = \
-                        old_weight[:, new_weight_index]
-                    new_bias = first_dense.bias._data[0]
-                    new_Dense.initialize(init=myInitializer(new_weights, new_bias), ctx=ctx)
-            elif last_conv_pruned and isinstance(layer, gradcam.Conv2D):
-                new_layer = gradcam.Conv2D(channels=layer.conv._kwargs["num_filter"],
-                                           kernel_size=layer.conv._kwargs["kernel"],
-                                           strides=layer.conv._kwargs["stride"],
-                                           padding=layer.conv._kwargs["pad"],
-                                           dilation=layer.conv._kwargs["dilate"],
-                                           groups=layer.conv._kwargs["num_group"])
-                old_weight = layer.conv.weight._data[0]
-                filter_index = [ii for ii in range(old_weight.shape[1]) if ii not in prune_target]
-                new_weight = old_weight[:, filter_index, :, :]
-                new_bias = layer.conv.bias._data[0]
-                last_conv_pruned = False
-                new_layer.conv.initialize(init=myInitializer(new_weight, new_bias), ctx=ctx)
-            else:
-                new_layer = layer
-            new_feature.add(new_layer)
-            index += 1
-
-    if last_conv_pruned:
-        new_classifier = nn.Sequential()
-        for index, layer in model.classifier._children.items():
-            if int(index) == 1:
-                new_classifier.add(new_Dense)
-            else:
-                new_classifier.add(layer)
-        model.classifier = new_classifier
-    # del model.features
-    # del model.classifier
     model.features = new_feature
     return model
 
-def prune_resblock(block,prune_mode,last_layer_pruned):
-    pass
+def prune_resblock(block,prune_plan,start_index,ctx):
+    '''
+    1) if the prune channel number of x and f(x) is different, make them to be the same
+    2) ignore the mismatch of channels between two feature maps
+    :param block:
+    :param prune_plan:
+    :param start_index:
+    :param ctx:
+    :return:
+    '''
+    new_block = models.Residual(same_shape=block.same_shape)
+    last_prune_target = prune_plan[start_index - 1] if start_index else []
+    prune_targets = [last_prune_target]
+    for ii in range(len(block._children)//2):
+        prune_targets.append(prune_plan[start_index+ii])
+    if not block.same_shape: # choose the smallest prune size between the 1st and last conv
+        if len(prune_targets[1]) >= len(prune_targets[-1]):
+            prune_targets[1] = prune_targets[1][:len(prune_targets[-1])]
+        else:
+            prune_targets[-1] = prune_targets[-1][:len(prune_targets[1])]
+    else:
+        if len(prune_targets[0]) >= len(prune_targets[-1]):
+            prune_targets[-1] += prune_targets[0][len(prune_targets[-1]):]
+        else:
+            prune_targets[-1] = prune_targets[-1][:len(prune_targets[0])]
+    # prune
+    i_conv = 0
+    i_a = 0
+    for name, layer in block._children.items():
+        if isinstance(layer, gradcam.Conv2D):
+            i_conv += 1
+            prune_target = prune_targets[i_conv]
+            new_layer = get_new_conv_layer(layer, prune_target, last_prune_target, ctx)
+            last_prune_target = prune_target
+        else:
+            i_a += 1
+            prune_target = prune_targets[i_a]
+            new_layer = get_new_prelu_layer(layer,prune_target,ctx)
+        new_block._children[name] = new_layer
+        setattr(new_block,name,new_layer)
+
+    # update prune_plan
+    for ii in range(len(block._children)//2):
+        prune_plan[start_index+ii] = prune_targets[ii+1]
+    return new_block, start_index+len(block._children)//2, prune_plan
+
+def get_new_conv_layer(layer, prune_target, last_prune_target,ctx):
+    new_layer = gradcam.Conv2D(channels=layer.conv._kwargs["num_filter"] - len(prune_target),
+                               kernel_size=layer.conv._kwargs["kernel"],
+                               strides=layer.conv._kwargs["stride"],
+                               padding=layer.conv._kwargs["pad"],
+                               dilation=layer.conv._kwargs["dilate"],
+                               groups=layer.conv._kwargs["num_group"])
+    old_weight = layer.conv.weight._data[0]
+
+    filter_index = [ii for ii in range(old_weight.shape[1]) if ii not in last_prune_target]
+    old_weight = old_weight[:, filter_index, :, :]
+
+    filter_index = [ii for ii in range(old_weight.shape[0]) if ii not in prune_target]
+    new_weight = old_weight[filter_index, :, :, :]
+    new_bias = layer.conv.bias._data[0][filter_index]
+    new_layer.conv.initialize(init=myInitializer(new_weight, new_bias), ctx=ctx)
+    new_layer.conv.bias.initialize(init=mx.init.Constant(new_bias),
+                                        force_reinit=True, ctx=ctx)
+    return new_layer
+
+def get_new_prelu_layer(layer,prune_target,ctx):
+    old_alpha = layer.alpha._data[0]
+    filter_index = [ii for ii in range(old_alpha.shape[1]) if ii not in prune_target]
+    new_layer = models.mPReLU(num_units=len(filter_index))
+    new_alpha = old_alpha[:,filter_index,:,:]
+    new_layer.alpha.initialize(init=mx.init.Constant(new_alpha),ctx=ctx)
+    return new_layer
 
 if __name__ == '__main__':
     ctx = mx.gpu()

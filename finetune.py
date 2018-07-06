@@ -96,13 +96,16 @@ class FilterPrunner:
         for l in filters_to_prune_per_layer:
             filters_to_prune_per_layer[l] = sorted(
                 filters_to_prune_per_layer[l])
+        for i in range(len(self.filter_ranks.keys())):
+            if i not in filters_to_prune_per_layer:
+                filters_to_prune_per_layer[i] = []
 
         return filters_to_prune_per_layer
 
 class PrunningFineTuner_VGG16:
     def __init__(self, train_path, model, log_dir=None, ctx=mx.cpu()):
         self.train_data_loader = dataset.train_loader(train_path,batch_size=128)
-        a,self.valid_data_loader,b = dataset.train_valid_test_loader(train_path,batch_size=64)
+        a,self.valid_data_loader,b = dataset.train_valid_test_loader(train_path,(0.9,0.05),batch_size=64)
         self.model = model
         self.ctx = ctx
         self.criterion = models.AngleLoss()
@@ -117,7 +120,7 @@ class PrunningFineTuner_VGG16:
 
     def train(self, trainer=None, epoches=10,
               save_highest=True, eval_train_acc=False, best_acc=0):
-        lr,lr_decay = 1e-4, 0.95
+        lr,lr_decay = 1e-4, 0.8
         if trainer is None:
             optimizer = mx.optimizer.Adam(lr)
             trainer = gluon.Trainer(self.model.collect_params(), optimizer)
@@ -129,8 +132,8 @@ class PrunningFineTuner_VGG16:
             start = time.time()
             self.get_cuda_memory()
             trainer = gluon.Trainer(self.model.collect_params(), mx.optimizer.Adam(lr))
-            lr *= lr_decay
             self.p.log("current learning rate is {}".format(lr))
+            lr *= lr_decay
             self.model.get_feature=False # whether to drop the last layer
             train_loss, loss_list = self.train_epoch(trainer,loss_list)
             self.p.log("train loss is %.4f"%train_loss)
@@ -152,10 +155,10 @@ class PrunningFineTuner_VGG16:
         else:
             self.model.save_params(self.model_save_path)
         self.eval()
-        with open(os.path.join(self.log_dir,"loss_list.pkl"),'rb') as f:
+        with open(os.path.join(self.log_dir,"loss_list.pkl"),'wb') as f:
             pickle.dump(loss_list,f)
-        iter_list = np.arange(10,epoches*len(self.train_data_loader)+1,10)
-        plt.plot(iter_list,loss_list)
+        # iter_list = np.arange(10,epoches*len(self.train_data_loader)+1,10)
+        # plt.plot(iter_list,loss_list)
         self.p.log("Finished fine tuning. best valid acc is %.4f" % best_acc)
 
     def train_batch(self, batch, label, rank_filters):
@@ -174,7 +177,6 @@ class PrunningFineTuner_VGG16:
         train_samples = 0
         start = time.time()
         data_loader = self.valid_data_loader if rank_filters else self.train_data_loader
-        print(len(data_loader))
         for ii, (batch, label) in enumerate(data_loader):
             if ii == len(data_loader)-1: break
             if not isinstance(ctx, list):
@@ -196,13 +198,13 @@ class PrunningFineTuner_VGG16:
                     cumulative_train_loss += loss.sum()
                 else:
                     cumulative_train_loss += loss.as_in_context(mx.cpu()).sum()
-            mx.ndarray.waitall()
-            if ii % 100 == 0:
-                # self.p.log("iter {}, time use: {}, loss: {}".format(ii,time.time()-start,
-                #                                                     loss.sum().asscalar()/batch.shape[0]))
-                print ii
-                start = time.time()
-                if ii % 10 == 0: loss_list.append(cumulative_train_loss.asscalar()/train_samples)
+                mx.ndarray.waitall()
+                if ii % 500 == 0:
+                    self.p.log("iter {}, time use: {}, loss: {}".format(ii,time.time()-start,
+                                                                        loss.sum().asscalar()/batch.shape[0]))
+                    start = time.time()
+                    # if ii % 10 == 0: loss_list.append(cumulative_train_loss.asscalar()/train_samples)
+            else: mx.nd.waitall()
         return cumulative_train_loss.asscalar()/train_samples, loss_list# total loss
 
     def get_candidates_to_prune(self, num_filters_to_prune):
@@ -262,16 +264,16 @@ class PrunningFineTuner_VGG16:
             self.reload_model()
             self.prunner = FilterPrunner(self.model, self.ctx)
             self.get_cuda_memory()
+            start = time.time()
             self.model.get_feature=False
             if ii+1:
                 prune_targets = self.get_candidates_to_prune(
                     num_filters_to_prune_per_iteration)
-            # if ii == 0:
-            #     with open(os.path.join(self.log_dir,"prune_target01.pkl"),"wb") as f:
-            #         pickle.dump(prune_targets,f)
-            else:
-                with open(os.path.join(self.log_dir,"prune_target01.pkl"),"rb") as f:
-                    prune_targets = pickle.load(f)
+                with open(os.path.join(self.log_dir,"prune_target01.pkl"),"wb") as f:
+                    pickle.dump(prune_targets,f)
+            self.p.log('ranking filters cost time: {}'.format(time.time()-start))
+            # with open('./log/prune-2018-07-06_115027/prune_target01.pkl','rb') as f:
+            #     prune_targets = pickle.load(f)
             self.model.get_feature = True
             self.get_cuda_memory()
             layers_prunned = {}
@@ -279,12 +281,12 @@ class PrunningFineTuner_VGG16:
                 layers_prunned[layer_index] = len(filter_index)
             self.p.log("Ranking filter use time %.2fs" % (time.time()-start))
             self.p.log("Layers that will be prunned :"+str(layers_prunned))
-            start = time.time()
+
             self.p.log(prune_targets)
             self.prunner.reset()
             self.p.log("Prunning filters.. ")
             self.model = prune_spherenet20_conv_once(self.model, prune_targets, ctx)
-            cur_acc = self.test()
+            cur_acc = self.eval()
             self.reload_model()
             self.prunner.reset()
             self.p.log(self.model)
@@ -299,7 +301,7 @@ class PrunningFineTuner_VGG16:
             optimizer = mx.optimizer.Adam(0.0001)
             trainer = gluon.Trainer(self.model.collect_params(),optimizer)
             self.train(trainer, epoches=5, best_acc = cur_acc)
-            cur_acc = self.eval()
+            # cur_acc = self.eval()
 
         self.p.log("#"*80)
         self.p.log("Finished. Going to fine tune the model a bit more")
@@ -330,7 +332,7 @@ def get_args():
                         default="./log/train-2018-07-02_091330/model")
     parser.add_argument("--device_id", type=int, default=5)
     parser.set_defaults(prune=True)
-    parser.set_defaults(log=False)
+    parser.set_defaults(log=True)
     args = parser.parse_args()
     return args
 
