@@ -64,7 +64,7 @@ def train_valid_test_loader(path, train_valid_ratio=(0.8,0.1), batch_size=32, nu
     untrain_dataset = datasets.ImageFolderDataset(path, transform=my_untrain_transform)
     num_train = len(train_dataset)
     print("number of total examples is %d" % num_train)
-    indices = list(range(num_train))
+    indices = np.random.permutation(num_train)
     split1 = int(np.floor(train_valid_ratio[0] * num_train))
     split2 = int(np.floor(sum(train_valid_ratio) * num_train))
     train_sampler = SubsetRandomSampler(indices, 0, split1)
@@ -134,8 +134,7 @@ def prepare_data2(data_dir, label_dir, new_dir):
 class SubsetRandomSampler(data.Sampler):
 
     def __init__(self, indices, start, end):
-        self.indices = np.random.permutation(len(indices))
-        self.indices = self.indices[start:] if end == -1 else self.indices[start:end]
+        self.indices = indices[start:] if end == -1 else indices[start:end]
 
     def __iter__(self):
         return iter(self.indices)

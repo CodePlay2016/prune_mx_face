@@ -175,31 +175,37 @@ class Residual(HybridBlock):
 
 class SphereNet20(HybridBlock):
     # http://ethereon.github.io/netscope/#/gist/20f6ddf70a35dec5019a539a502bccc5
-    def __init__(self, num_classes=10574, verbose=False, **kwargs):
+    def __init__(self, num_classes=10574,archi_dict=None, verbose=False, **kwargs):
         super(SphereNet20, self).__init__(**kwargs)
         self.verbose = verbose
         self.get_feature = True
+        self.arhi_dict = archi_dict
         # add name_scope on the outermost Sequential
         with self.name_scope():
             # block 1
-            self.features = nn.HybridSequential()
-            b1 = Residual(64, same_shape=False)
+            if archi_dict:
+                self.redefine()
+            else:
+                self.features = nn.HybridSequential()
+                b1 = Residual(64, same_shape=False)
 
-            # block 2
-            b2_1 = Residual(128, same_shape=False)
-            b2_2 = Residual(128)
+                # block 2
+                b2_1 = Residual(128, same_shape=False)
+                b2_2 = Residual(128)
 
-            # block3
-            b3_1 = Residual(256, same_shape=False)
-            b3_2 = Residual(256)
-            b3_3 = Residual(256)
-            b3_4 = Residual(256)
+                # block3
+                b3_1 = Residual(256, same_shape=False)
+                b3_2 = Residual(256)
+                b3_3 = Residual(256)
+                b3_4 = Residual(256)
 
-            # block 4
-            b4 = Residual(512, same_shape=False)
-            f5 = nn.Dense(512)
-            f6 = AngleLinear(in_units=512,units=num_classes)
-            self.features.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5)
+                # block 4
+                b4 = Residual(512, same_shape=False)
+                f5 = nn.Dense(512)
+
+                self.features.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5)
+
+            f6 = AngleLinear(in_units=512, units=num_classes)
             self.classifier = f6
 
     def hybrid_forward(self, F,x,  *args, **kwargs):
@@ -246,6 +252,25 @@ class SphereNet20(HybridBlock):
                 print 'conv%d_%d.weight'%(block_index,res_index)
                 res_index += 1
         self.classifier.initialize(ctx=ctx)
+    def redefine(self):
+        archi_dict = self.arhi_dict
+        if not archi_dict is None:
+            with self.name_scope():
+                new_features = nn.HybridSequential()
+                for name, modules in archi_dict.items():
+                    same_shape = True if len(archi_dict[name]) == 4 else False
+                    new_block = Residual(same_shape=same_shape)
+                    for name_, num_channels in modules.items():
+                        if name[:-1] == 'conv':
+                            strides = 2
+                            new_layer = gradcam.Conv2D(num_channels,
+                                                       kernel_size=(3, 3),
+                                                       strides=smodule.conv._kwargs['stride'])
+                        else:
+                            new_layer = mPReLU(archi_dict[name][name_])
+                        new_block._children[name_] = new_layer
+                    new_features.add(new_block)
+                self.features = new_features
 
 def init_model(pkl_path):
     mnet = SphereNet20()

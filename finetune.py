@@ -236,16 +236,27 @@ class PrunningFineTuner_VGG16:
         self.p.log(msg+res)
         return res
 
+    def get_model_architecture(self):
+        filters = {}
+        for name, module in self.model.features._children.items():
+            filters[name] = {}
+            if isinstance(module, nn.Dense):
+                filters[name] = module.weight._data[0].shape[1]
+            for name_, smodule in module._children.items():
+                if isinstance(smodule, gradcam.Conv2D):
+                    filters[name][name_] = smodule.conv._kwargs["num_filter"]
+                else:
+                    filters[name][name_] = filters[name]['conv'+name_[-1]]
+        return filters
+
     def reload_model(self):
         self.model.save_params(self.model_save_path)
-        # self.model = ModifiedVGG16Model(ctx=ctx)
+        with open(os.path.join(self.log_dir,'ModelAchi.pkl'),'wb') as f:
+            pickle.dump(self.get_model_architecture(),f)
         self.model.load_params(self.model_save_path, ctx=self.ctx)
         gc.collect()
 
     def prune(self):
-        # Get the accuracy before prunning
-        # self.test()
-
         number_of_filters = self.total_num_filters()
         num_filters_to_prune_per_iteration = 512
         iterations = int(float(number_of_filters) /
@@ -270,10 +281,14 @@ class PrunningFineTuner_VGG16:
                 prune_targets = self.get_candidates_to_prune(
                     num_filters_to_prune_per_iteration)
                 with open(os.path.join(self.log_dir,"prune_target01.pkl"),"wb") as f:
-                    pickle.dump(prune_targets,f)
+                    pickle.dump(prune_targets, f)
+                # with open('./log/prune-2018-07-06_115027/prune_target01.pkl', 'rb') as f:
+                #     prune_targets = pickle.load(f)
+            # elif ii == 1:
+            #     with open('./log/prune-2018-07-06_153259/prune_target01.pkl', 'rb') as f:
+            #         prune_targets = pickle.load(f)
             self.p.log('ranking filters cost time: {}'.format(time.time()-start))
-            # with open('./log/prune-2018-07-06_115027/prune_target01.pkl','rb') as f:
-            #     prune_targets = pickle.load(f)
+
             self.model.get_feature = True
             self.get_cuda_memory()
             layers_prunned = {}
@@ -330,9 +345,9 @@ def get_args():
     parser.add_argument("--train_path", type=str, default="/home1/CASIA-WebFace/aligned_Webface-112X96")
     parser.add_argument("--model_path", type=str,
                         default="./log/train-2018-07-02_091330/model")
-    parser.add_argument("--device_id", type=int, default=5)
+    parser.add_argument("--device_id", type=int, default=6)
     parser.set_defaults(prune=True)
-    parser.set_defaults(log=True)
+    parser.set_defaults(log=False)
     args = parser.parse_args()
     return args
 
@@ -356,7 +371,7 @@ if __name__ == '__main__':
 
     # gpus = [0,1]
     # ctx = [mx.gpu(ii) for ii in gpus]
-    ctx = mx.gpu(5)
+    ctx = mx.gpu(args.device_id)
     time_info = time.strftime('%Y-%m-%d_%H%M%S', time.localtime(time.time()))
     log_dir = os.path.abspath("./log/")
     if not args.prune:
@@ -385,3 +400,4 @@ if __name__ == '__main__':
     else:
         model = fine_tuner.prune()
         p.log(model)
+    print 'over'

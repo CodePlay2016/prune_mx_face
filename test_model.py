@@ -80,7 +80,6 @@ def KFold(n=6000, n_folds=10, shuffle=False):
         folds.append([train, test])
     return folds
 
-
 def eval_acc(threshold, diff):
     y_true = []
     y_predict = []
@@ -92,7 +91,6 @@ def eval_acc(threshold, diff):
     y_predict = np.array(y_predict)
     accuracy = 1.0 * np.count_nonzero(y_true == y_predict) / len(y_true)
     return accuracy
-
 
 def find_best_threshold(thresholds, predicts):
     best_threshold = best_acc = 0
@@ -116,6 +114,7 @@ def test_on_LFW(model,ctx=mx.gpu()):
         # mTransform,
     ])
 
+    start = time.time()
     for i in range(6000):
         p = pairs_lines[i].replace('\n', '').split('\t')
 
@@ -151,17 +150,77 @@ def test_on_LFW(model,ctx=mx.gpu()):
         accuracy.append(eval_acc(best_thresh, predicts[test]))
         thd.append(best_thresh)
     # print time.time() - start-cost # single 1080Ti about 100s
-    print('LFWACC={:.4f} std={:.4f} thd={:.4f}'.format(np.mean(accuracy), np.std(accuracy), np.mean(thd)))
+    print('LFWACC={:.4f} std={:.4f} thd={:.4f}, test time:{:.4f}'.format(np.mean(accuracy), np.std(accuracy),
+                                                                         np.mean(thd),time.time()-start))
 
     return np.mean(accuracy)
 
 
 if __name__ == "__main__":
-    model = models.SphereNet20()
+    archi_dict = {
+        '0':{
+            'conv0':40,
+            'a0':40,
+            'conv1':32,
+            'a1':32,
+            'conv2':40,
+            'a2':40
+        },
+        '1': {
+            'conv0': 74,
+            'a0': 74,
+            'conv1': 73,
+            'a1': 73,
+            'conv2': 74,
+            'a2': 74
+        },
+        '2': {
+            'conv1': 75,
+            'a1': 75,
+            'conv2': 74,
+            'a2': 74
+        },
+        '3': {
+            'conv0': 115,
+            'a0': 115,
+            'conv1': 108,
+            'a1': 108,
+            'conv2': 115,
+            'a2': 115
+        },
+        '4': {
+            'conv1': 97,
+            'a1': 97,
+            'conv2': 115,
+            'a2': 115
+        },
+        '5': {
+            'conv1': 106,
+            'a1': 106,
+            'conv2': 115,
+            'a2': 115
+        },
+        '6': {
+            'conv1': 110,
+            'a1': 110,
+            'conv2': 115,
+            'a2': 115
+        },
+        '7': {
+            'conv0': 205,
+            'a0': 205,
+            'conv1': 143,
+            'a1': 143,
+            'conv2': 205,
+            'a2': 205
+        }
+    }
+    model = models.SphereNet20(archi_dict=archi_dict)
+    model.redefine()
     # gpus = [0,1]
     # ctx = [mx.gpu(ii) for ii in gpus]
     ctx = mx.gpu()
-    model.load_params("/home/hfq/model_compress/prune/1611.06440/prune_mx_face/spherenet_model", ctx=ctx)
+    model.load_params("/home/hfq/model_compress/prune/1611.06440/prune_mx_face/log/prune-2018-07-08_140857/model", ctx=ctx)
     start = time.time()
     test_on_LFW(model)
     print time.time()-start

@@ -16,9 +16,10 @@ def prune_spherenet20_conv_once(model, prune_targets,ctx):
     last_index = 0
     for name, module in model.features._children.items():
         if isinstance(module, nn.Dense):
-            old_weight = module.weight._data[0]
-            params_per_input_channel = old_weight.shape[1] / model.features._children['7'].conv2.conv._channels
-            filter_index = [ii for ii in range(old_weight.shape[0]) if ii not in prune_targets[last_index-1]]
+            old_channels = model.features._children['7'].conv2.conv._channels
+            old_weight = module.weight._data[0] # [out_channel, in_channel]
+            params_per_input_channel = old_weight.shape[1] / old_channels
+            filter_index = [ii for ii in range(old_channels) if ii not in prune_targets[last_index-1]]
             new_Dense = \
                 nn.Dense(module._units, in_units=params_per_input_channel * len(filter_index))
             new_weight_index = [jj for ii in filter_index for jj in range(ii * params_per_input_channel,
@@ -34,6 +35,7 @@ def prune_spherenet20_conv_once(model, prune_targets,ctx):
             new_feature.add(new_block)
 
     model.features = new_feature
+    print prune_targets
     return model
 
 def prune_resblock(block,prune_plan,start_index,ctx):
@@ -58,7 +60,9 @@ def prune_resblock(block,prune_plan,start_index,ctx):
             prune_targets[-1] = prune_targets[-1][:len(prune_targets[1])]
     else:
         if len(prune_targets[0]) >= len(prune_targets[-1]):
-            prune_targets[-1] += prune_targets[0][len(prune_targets[-1]):]
+            for target in prune_targets[0]:
+                if len(prune_targets[0]) == len(prune_targets[-1]): break
+                if target not in prune_targets[-1]: prune_targets[-1].append(target)
         else:
             prune_targets[-1] = prune_targets[-1][:len(prune_targets[0])]
     # prune
@@ -79,7 +83,7 @@ def prune_resblock(block,prune_plan,start_index,ctx):
 
     # update prune_plan
     for ii in range(len(block._children)//2):
-        prune_plan[start_index+ii] = prune_targets[ii+1]
+        prune_plan[start_index+ii] = sorted(prune_targets[ii+1])
     return new_block, start_index+len(block._children)//2, prune_plan
 
 def get_new_conv_layer(layer, prune_target, last_prune_target,ctx):
@@ -98,8 +102,11 @@ def get_new_conv_layer(layer, prune_target, last_prune_target,ctx):
     new_weight = old_weight[filter_index, :, :, :]
     new_bias = layer.conv.bias._data[0][filter_index]
     new_layer.conv.initialize(init=myInitializer(new_weight, new_bias), ctx=ctx)
-    new_layer.conv.bias.initialize(init=mx.init.Constant(new_bias),
+    try:
+        new_layer.conv.bias.initialize(init=mx.init.Constant(new_bias),
                                         force_reinit=True, ctx=ctx)
+    except Exception:
+        print new_layer
     return new_layer
 
 def get_new_prelu_layer(layer,prune_target,ctx):
