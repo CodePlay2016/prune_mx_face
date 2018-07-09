@@ -239,14 +239,17 @@ class PrunningFineTuner_VGG16:
     def get_model_architecture(self):
         filters = {}
         for name, module in self.model.features._children.items():
-            filters[name] = {}
+            name = int(name)
+            filters[name] = [0,0]
             if isinstance(module, nn.Dense):
                 filters[name] = module.weight._data[0].shape[1]
+                continue
             for name_, smodule in module._children.items():
                 if isinstance(smodule, gradcam.Conv2D):
-                    filters[name][name_] = smodule.conv._kwargs["num_filter"]
-                else:
-                    filters[name][name_] = filters[name]['conv'+name_[-1]]
+                    if name_ == 'conv1':
+                        filters[name][0] = smodule.conv._kwargs["num_filter"]
+                    elif name == 'conv2':
+                        filters[name][1] = smodule.conv._kwargs["num_filter"]
         return filters
 
     def reload_model(self):
@@ -264,6 +267,7 @@ class PrunningFineTuner_VGG16:
         iterations = int(iterations * 2.0 / 3)
         self.p.log(
             r"We will prune 67% filters in " + str(iterations)+ "iterations")
+        self.get_model_architecture()
         # Make sure all the layers are trainable
         # self.set_grad_requirment(True)
         for ii in range(iterations):
