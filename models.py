@@ -21,13 +21,12 @@ class myInitializer(mx.init.Initializer):
         arr[:] = self.bias
 
 class AngleLinear(HybridBlock):
-    def __init__(self, units, in_units=0,
+    def __init__(self, units, in_units=0, initializer=None,
                  m = 4, phiflag=True, **kwargs):
         super(AngleLinear, self).__init__(**kwargs)
         self.out_features = units
-        weight = nd.L2Normalization(nd.random.uniform(-1,1,shape=(units,in_units)))# the weight need to be specially initialize
         self.weight = self.params.get('weight',shape=(units,in_units),
-                                      init=mx.init.Constant(weight),allow_deferred_init=True)
+                                      init=initializer)
         self.phiflag = phiflag
         self.m = m
         self.mlambda = [ # given cos_x, calculate the cos_mx
@@ -39,30 +38,29 @@ class AngleLinear(HybridBlock):
             lambda x: 16*x**5-20*x**3+5*x
         ]
 
-    def hybrid_forward(self, F, x, *args, **params):
+    def hybrid_forward(self, F, x, weight, *args, **params):
         # xsize=(B,F)    F is feature len
-        w = self.weight._data[0] # size=(Classnum,F) F=in_features Classnum=out_features
-
-
-        ww = nd.L2Normalization(w)
+        # w = self.weight._data[0] # size=(Classnum,F) F=in_features Classnum=out_features
+        ww = F.L2Normalization(weight)
         xlen = x.square().sum(axis=1,keepdims=True).sqrt() # size=B
         wlen = ww.square().sum(axis=1,keepdims=True).sqrt() # size=Classnum
 
-        cos_theta = nd.dot(x,ww.T)/ xlen.reshape(-1,1) / wlen.reshape(1,-1).clip(-1,1) # size=(B,Classnum)
+        cos_theta = F.broadcast_div(F.broadcast_div(F.dot(x,ww.transpose()), xlen.reshape((-1,1))),
+                                    wlen.reshape((1,-1)).clip(-1,1)) # size=(B,Classnum)
 
         if self.phiflag:
             cos_m_theta = self.mlambda[self.m](cos_theta)
-            theta = nd.arccos(cos_theta)
-            k = (self.m*theta/math.pi).floor()
+            theta = F.arccos(cos_theta)
+            k = (self.m * theta / math.pi).floor()
             n_one = k*0.0 - 1
-            phi_theta = (n_one**k) * cos_m_theta - 2*k
+            phi_theta = F.broadcast_mul((n_one**k), cos_m_theta) - 2*k
         else:
             theta = cos_theta.acos()
             phi_theta = self.myphi(theta,self.m)
             phi_theta = phi_theta.clip(-1*self.m,1)
 
-        xcos_theta = cos_theta * xlen.reshape(-1,1)
-        xphi_theta = phi_theta * xlen.reshape(-1,1)
+        xcos_theta = F.broadcast_mul(cos_theta, xlen.reshape((-1,1)))
+        xphi_theta = F.broadcast_mul(phi_theta, xlen.reshape((-1,1)))
         output = (xcos_theta,xphi_theta)
         return output # size=(B,Classnum,2)
 
@@ -91,7 +89,7 @@ class AngleLoss(gluon.loss.Loss):
         output =  xcos_theta - oh_target * xcos_theta[range(0,batch_size),target].reshape(-1,1)*(1.0+0)/(1+self.lamb) +\
                                 oh_target * xphi_theta[range(0,batch_size),target].reshape(-1,1)*(1.0+0)/(1+self.lamb)
 
-        loss = nd.softmax_cross_entropy(output, nd.cast(target,'float32')) # (B,Classnum)
+        loss = F.softmax_cross_entropy(output, F.cast(target,'float32')) # (B,Classnum)
         return loss
 
 class mPReLU(HybridBlock):
@@ -103,11 +101,10 @@ class mPReLU(HybridBlock):
         super(mPReLU, self).__init__(**kwargs)
         self.num_units = num_units
         with self.name_scope():
-            self.alpha = self.params.get('alpha', shape=(1,num_units,1,1), init=initializer,
-                                         grad_req='write')
+            self.alpha = self.params.get('alpha', shape=(1,num_units,1,1), init=initializer)
 
     def hybrid_forward(self, F, x, alpha):
-        return mx.nd.maximum(x,0)+ mx.nd.minimum(alpha*x,0)
+        return F.maximum(x,0)+ F.minimum(F.broadcast_mul(alpha,x),0)
 
 class Residual(HybridBlock):
     def __init__(self, channels=(64,64), same_shape=True, **kwargs):
@@ -151,26 +148,27 @@ class SphereNet20(HybridBlock):
     def __init__(self, num_classes=10574,archi_dict=None, verbose=False, **kwargs):
         super(SphereNet20, self).__init__(**kwargs)
         self.verbose = verbose
+        self.num_classes=num_classes
         self.get_feature = True
-        self.arhi_dict = archi_dict if archi_dict else self.default_params
+        self.archi_dict = archi_dict if archi_dict else self.default_params
         # add name_scope on the outermost Sequential
         with self.name_scope():
             # block 1
             self.features = nn.HybridSequential()
-            b1 = Residual(self.arhi_dict[0], same_shape=False)
+            b1 = Residual(self.archi_dict[0], same_shape=False)
 
             # block 2
-            b2_1 = Residual(self.arhi_dict[1], same_shape=False)
-            b2_2 = Residual(self.arhi_dict[2])
+            b2_1 = Residual(self.archi_dict[1], same_shape=False)
+            b2_2 = Residual(self.archi_dict[2])
 
             # block3
-            b3_1 = Residual(self.arhi_dict[3], same_shape=False)
-            b3_2 = Residual(self.arhi_dict[4])
-            b3_3 = Residual(self.arhi_dict[5])
-            b3_4 = Residual(self.arhi_dict[6])
+            b3_1 = Residual(self.archi_dict[3], same_shape=False)
+            b3_2 = Residual(self.archi_dict[4])
+            b3_3 = Residual(self.archi_dict[5])
+            b3_4 = Residual(self.archi_dict[6])
 
             # block 4
-            b4 = Residual(self.arhi_dict[7], same_shape=False)
+            b4 = Residual(self.archi_dict[7], same_shape=False)
             f5 = nn.Dense(512)
             self.features.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5)
 
@@ -219,7 +217,10 @@ class SphereNet20(HybridBlock):
                                        force_reinit=True,  ctx=ctx)
                 print 'conv%d_%d.weight'%(block_index,res_index)
                 res_index += 1
-        self.classifier.initialize(ctx=ctx)
+
+        weight = nd.L2Normalization(
+            nd.random.uniform(-1, 1, shape=(self.num_classes, 512)))  # the weight need to be specially initialize
+        self.classifier.initialize(init=mx.init.Constant(weight),ctx=ctx)
 
 def init_model(pkl_path):
     mnet = SphereNet20()

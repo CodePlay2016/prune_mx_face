@@ -159,7 +159,8 @@ def test_on_LFW(model,ctx=mx.gpu()):
 
 def test_speed(model,batch_size=64, ctx=mx.gpu()):
     train_data_loader, _, _ = dataset.train_valid_test_loader('/home1/CASIA-WebFace/aligned_Webface-112X96',
-                                                              (0.9, 0.05), batch_size=batch_size)
+                                                              (0.9, 0.05), batch_size=1)
+
     total = 0
     for batch, label in train_data_loader:
         batch = batch.as_in_context(ctx)
