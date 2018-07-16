@@ -20,48 +20,6 @@ class myInitializer(mx.init.Initializer):
     def _init_bias(self, _, arr):
         arr[:] = self.bias
 
-class ModifiedVGG16Model(gluon.Block):
-    def __init__(self, ctx=mx.cpu(), pretrained=False, prune=True):
-        super(ModifiedVGG16Model, self).__init__()
-        self.prune = prune
-        self.conv_output = {}
-
-        model = vision.vgg16(pretrained=pretrained, ctx=ctx)
-        self.features = nn.Sequential()
-
-        for ii, layer in enumerate(model.features):
-
-            if isinstance(layer, nn.Conv2D):
-                fsize = layer.weight.shape[2]
-                new_layer = gradcam.Conv2D(layer._channels,(fsize,fsize))
-                if pretrained:
-                    # new_layer.conv = layer
-                    new_layer.initialize(init=myInitializer(layer.weight._data[0],
-                                                            layer.bias._data[0]),ctx=ctx)
-                self.features.add(new_layer)
-            elif ii<31: self.features.add(layer)
-
-        # for param in self.features.parameters():
-        #     param.requires_grad = False
-        self.classifier = nn.Sequential()
-        self.classifier.add(nn.Dropout(0.5))
-        self.classifier.add(nn.Dense(4096,activation="relu"))
-        self.classifier.add(nn.Dropout(0.5))
-        self.classifier.add(nn.Dense(4096,activation="relu"))
-        self.classifier.add(nn.LeakyReLU(0))
-        self.classifier.add(nn.Dense(2))
-        if pretrained:
-            self.classifier.initialize(mx.init.Xavier(), ctx=ctx)
-
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
-
-    def set_prune(self, prune):
-        self.prune = prune
-
 class AngleLinear(HybridBlock):
     def __init__(self, units, in_units=0,
                  m = 4, phiflag=True, **kwargs):

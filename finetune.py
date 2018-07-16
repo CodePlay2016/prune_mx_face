@@ -15,12 +15,12 @@ import mxnet.gluon.nn as nn
 import mxnet as mx
 from mxnet import autograd
 
-
 import models
 from test_model import test_on_LFW
-
 import gradcam
 # reference: https://github.com/apache/incubator-mxnet/blob/master/example/cnn_visualization/gradcam.py
+
+mx.random.seed(128)
 
 class FilterPrunner:
     def __init__(self, mmodel, ctx):
@@ -119,7 +119,7 @@ class PrunningFineTuner_VGG16:
         return test_on_LFW(self.model,ctx=self.ctx)
 
     def train(self, trainer=None, epoches=10,
-              save_highest=True, eval_train_acc=False, best_acc=0):
+              save_highest=True):
         lr,lr_decay = 1e-4, 0.8
         if trainer is None:
             optimizer = mx.optimizer.Adam(lr)
@@ -140,7 +140,7 @@ class PrunningFineTuner_VGG16:
             train_time = time.time() - start
             self.get_cuda_memory()
             if best_loss > train_loss:
-                best_acc = train_loss
+                best_loss = train_loss
                 if save_highest:
                     self.model.save_params(self.model_save_path)
                     self.model_saved = True
@@ -154,12 +154,13 @@ class PrunningFineTuner_VGG16:
             self.model_saved = False
         else:
             self.model.save_params(self.model_save_path)
-        self.eval()
+        self.p.log(self.eval())
         with open(os.path.join(self.log_dir,"loss_list.pkl"),'wb') as f:
             pickle.dump(loss_list,f)
         # iter_list = np.arange(10,epoches*len(self.train_data_loader)+1,10)
         # plt.plot(iter_list,loss_list)
-        self.p.log("Finished fine tuning. best valid acc is %.4f" % best_acc)
+        self.p.log("Finished fine tuning. best valid loss is %.4f" % best_loss)
+        return best_loss
 
     def train_batch(self, batch, label, rank_filters):
         if rank_filters:
@@ -248,49 +249,42 @@ class PrunningFineTuner_VGG16:
                 if isinstance(smodule, gradcam.Conv2D):
                     if name_ == 'conv1':
                         filters[name][0] = smodule.conv._kwargs["num_filter"]
-                    elif name == 'conv2':
+                    elif name_ == 'conv2':
                         filters[name][1] = smodule.conv._kwargs["num_filter"]
         return filters
 
     def reload_model(self):
         self.model.save_params(self.model_save_path)
+        archi_dict = self.get_model_architecture()
         with open(os.path.join(self.log_dir,'ModelAchi.pkl'),'wb') as f:
-            pickle.dump(self.get_model_architecture(),f)
+            pickle.dump(archi_dict,f)
+        self.model = SphereNet20(archi_dict=archi_dict)
         self.model.load_params(self.model_save_path, ctx=self.ctx)
         gc.collect()
 
-    def prune(self):
+    def prune(self,rate=0.67):
         number_of_filters = self.total_num_filters()
         num_filters_to_prune_per_iteration = 512
         iterations = int(float(number_of_filters) /
                          num_filters_to_prune_per_iteration)
-        iterations = int(iterations * 2.0 / 3)
+        iterations = int(iterations * rate)
         self.p.log(
-            r"We will prune 67% filters in " + str(iterations)+ "iterations")
-        self.get_model_architecture()
+            r"We will prune {:.2f}% filters in ".format(rate*100) + str(iterations)+ " iterations")
         # Make sure all the layers are trainable
         # self.set_grad_requirment(True)
         for ii in range(iterations):
             self.p.log("#"*80)
             self.p.log("Prune iteration %d: " % ii)
             self.p.log("Ranking filters.. ")
-            start = time.time()
             # update model to the prunner
-            self.reload_model()
             self.prunner = FilterPrunner(self.model, self.ctx)
             self.get_cuda_memory()
             start = time.time()
             self.model.get_feature=False
-            if ii+1:
-                prune_targets = self.get_candidates_to_prune(
-                    num_filters_to_prune_per_iteration)
-                with open(os.path.join(self.log_dir,"prune_target01.pkl"),"wb") as f:
-                    pickle.dump(prune_targets, f)
-                # with open('./log/prune-2018-07-06_115027/prune_target01.pkl', 'rb') as f:
-                #     prune_targets = pickle.load(f)
-            # elif ii == 1:
-            #     with open('./log/prune-2018-07-06_153259/prune_target01.pkl', 'rb') as f:
-            #         prune_targets = pickle.load(f)
+            prune_targets = self.get_candidates_to_prune(
+                num_filters_to_prune_per_iteration)
+            with open(os.path.join(self.log_dir,"prune_target01.pkl"),"wb") as f:
+                pickle.dump(prune_targets, f)
             self.p.log('ranking filters cost time: {}'.format(time.time()-start))
 
             self.model.get_feature = True
@@ -305,7 +299,7 @@ class PrunningFineTuner_VGG16:
             self.prunner.reset()
             self.p.log("Prunning filters.. ")
             self.model = prune_spherenet20_conv_once(self.model, prune_targets, ctx)
-            cur_acc = self.eval()
+            _, cur_acc = self.eval()
             self.reload_model()
             self.prunner.reset()
             self.p.log(self.model)
@@ -319,17 +313,17 @@ class PrunningFineTuner_VGG16:
             self.p.log("Fine tuning to recover from prunning iteration.")
             optimizer = mx.optimizer.Adam(0.0001)
             trainer = gluon.Trainer(self.model.collect_params(),optimizer)
-            self.train(trainer, epoches=5, best_acc = cur_acc)
+            self.train(trainer, epoches=5)
             # cur_acc = self.eval()
 
         self.p.log("#"*80)
         self.p.log("Finished. Going to fine tune the model a bit more")
         self.reload_model()
-        optimizer = mx.optimizer.Adam(0.0001)
+        optimizer = mx.optimizer.Adam(0.00001)
         trainer = gluon.Trainer(self.model.classifier.collect_params(),optimizer)
-        self.train(trainer, epoches=10, best_acc=cur_acc)
-        self.eval()
+        self.train(trainer, epoches=10)
         self.model.save_params(os.path.join(self.log_dir, "model_pruned"))
+        self.reload_model()
         return self.model
 
 class myThread(threading.Thread):
@@ -345,13 +339,14 @@ class myThread(threading.Thread):
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prune", dest="prune", action="store_true")
+    parser.add_argument("--prune_rate", type=int, default=1)
     parser.add_argument("--no-log", dest="log", action="store_false")
     parser.add_argument("--train_path", type=str, default="/home1/CASIA-WebFace/aligned_Webface-112X96")
     parser.add_argument("--model_path", type=str,
                         default="./log/train-2018-07-02_091330/model")
     parser.add_argument("--device_id", type=int, default=6)
     parser.set_defaults(prune=True)
-    parser.set_defaults(log=False)
+    parser.set_defaults(log=True)
     args = parser.parse_args()
     return args
 
@@ -402,6 +397,6 @@ if __name__ == '__main__':
             os.system("cp finetune.py "+log_dir)
         # torch.save(model, log_dir+"model")
     else:
-        model = fine_tuner.prune()
+        model = fine_tuner.prune(rate=args.prune_rate)
         p.log(model)
     print 'over'
