@@ -3,6 +3,7 @@ import models,dataset
 import pickle,os
 
 from mxnet.contrib.quantization import *
+# reference: https://github.com/apache/incubator-mxnet/tree/master/example/quantization
 
 
 def export_sym(model_path, ctx=mx.gpu()):
@@ -27,4 +28,17 @@ def export_sym(model_path, ctx=mx.gpu()):
 if __name__ == '__main__':
     original_model_path = "./log/train-2018-07-02_091330"
     model_path = "./log/prune-2018-07-14_003715"
-    export_sym(original_model_path)
+    # export_sym(original_model_path)
+    ctx = mx.gpu()
+    sym_model_prefix = os.path.join(original_model_path,'model_symbol')
+    sym, arg_params, aux_params = mx.model.load_checkpoint(sym_model_prefix, 0)
+    print sym.get_internals().list_outputs()
+    cqsym, qarg_params, aux_params = quantize_model(sym=sym, arg_params=arg_params, aux_params=aux_params,
+                                                    ctx=ctx,calib_mode='none',
+                                                    excluded_sym_names=['spherenet200_conv0_fwd'])
+    mod = mx.mod.Module(symbol=sym, context=ctx,label_names=None)
+    mod.bind(data_shapes=[('data', (32, 3, 96, 112))],for_training=False)
+    mod.load_params(sym_model_prefix+'-0000.params')
+
+    print mod
+

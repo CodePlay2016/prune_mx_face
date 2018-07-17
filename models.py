@@ -26,7 +26,7 @@ class AngleLinear(HybridBlock):
         super(AngleLinear, self).__init__(**kwargs)
         self.out_features = units
         self.weight = self.params.get('weight',shape=(units,in_units),
-                                      init=initializer)
+                                      init=initializer,allow_deferred_init=True)
         self.phiflag = phiflag
         self.m = m
         self.mlambda = [ # given cos_x, calculate the cos_mx

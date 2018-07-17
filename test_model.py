@@ -6,7 +6,7 @@ import glob, pickle, time, os
 import numpy as np
 from PIL import Image
 
-
+mx.random.seed(128)
 class MTransform(mx.gluon.nn.Block):
     '''
     normalize each image with its mean and variance value
@@ -159,9 +159,10 @@ def test_on_LFW(model,ctx=mx.gpu()):
 
 def test_speed(model,batch_size=64, ctx=mx.gpu()):
     train_data_loader, _, _ = dataset.train_valid_test_loader('/home1/CASIA-WebFace/aligned_Webface-112X96',
-                                                              (0.9, 0.05), batch_size=1)
+                                                              (0.9, 0.05), batch_size=64)
 
     total = 0
+    model.hybridize()
     for batch, label in train_data_loader:
         batch = batch.as_in_context(ctx)
         start = time.time()
@@ -172,8 +173,8 @@ def test_speed(model,batch_size=64, ctx=mx.gpu()):
 if __name__ == "__main__":
     # gpus = [0,1]
     # ctx = [mx.gpu(ii) for ii in gpus]
-    model_path1 = "./log/prune-2018-07-08_140857"
-    model_path2 = "./log/prune-2018-07-13_005646"
+    model_path1 = "./log/prune-2018-07-13_121936"
+    model_path2 = "./log/prune-2018-07-14_003715"
     ctx = mx.gpu()
     archi_dict = {
         0:[32,40],
@@ -185,18 +186,18 @@ if __name__ == "__main__":
         6:[110,115],
         7:[143,205]
     }
-    # with open(os.path.join(model_path1,"ModelAchi.pkl"),"rb") as f:
-    #     archi_dict1 = pickle.load(f)
-    with open(os.path.join(model_path1,"ModelAchi.pkl"),"wb") as f:
-        pickle.dump(archi_dict,f)
+    with open(os.path.join(model_path1,"ModelAchi.pkl"),"rb") as f:
+        archi_dict1 = pickle.load(f)
+    # with open(os.path.join(model_path1,"ModelAchi.pkl"),"wb") as f:
+    #     pickle.dump(archi_dict,f)
     with open(os.path.join(model_path2,"ModelAchi.pkl"),"rb") as f:
         archi_dict2 = pickle.load(f)
-    model1 = models.SphereNet20(archi_dict=archi_dict)
+    model1 = models.SphereNet20(archi_dict=archi_dict1)
     model1.load_params(os.path.join(model_path1,"model"), ctx=ctx)
     model2 = models.SphereNet20(archi_dict=archi_dict2)
     model2.load_params(os.path.join(model_path2,"model"), ctx=ctx)
-    # print(test_on_LFW(model1))
-    # print(test_on_LFW(model2))
+    print(test_on_LFW(model1))
+    print(test_on_LFW(model2))
     test_speed(model1)
     test_speed(model2)
     print 'over'

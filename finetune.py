@@ -115,8 +115,11 @@ class PrunningFineTuner_VGG16:
         self.model_saved = False
         self.device_id = 6
 
-    def eval(self):
-        return test_on_LFW(self.model,ctx=self.ctx)
+    def eval(self,hybridize=True):
+        self.model.hybridize(hybridize)
+        res = test_on_LFW(self.model,ctx=self.ctx)
+        self.model.hybridize(False)
+        return res
 
     def train(self, trainer=None, epoches=10,
               save_highest=True):
@@ -178,6 +181,7 @@ class PrunningFineTuner_VGG16:
         train_samples = 0
         start = time.time()
         data_loader = self.valid_data_loader if rank_filters else self.train_data_loader
+        if not rank_filters: self.model.hybridize()
         for ii, (batch, label) in enumerate(data_loader):
             if ii == len(data_loader)-1: break
             if not isinstance(ctx, list):
@@ -206,6 +210,7 @@ class PrunningFineTuner_VGG16:
                     start = time.time()
                     # if ii % 10 == 0: loss_list.append(cumulative_train_loss.asscalar()/train_samples)
             else: mx.nd.waitall()
+        self.model.hybridize(False)
         return cumulative_train_loss.asscalar()/train_samples, loss_list# total loss
 
     def get_candidates_to_prune(self, num_filters_to_prune):
@@ -285,6 +290,8 @@ class PrunningFineTuner_VGG16:
                 num_filters_to_prune_per_iteration)
             with open(os.path.join(self.log_dir,"prune_target01.pkl"),"wb") as f:
                 pickle.dump(prune_targets, f)
+            # with open(os.path.join("./log/prune-2018-07-16_171741","prune_target01.pkl"),"rb") as f:
+            #     prune_targets = pickle.load(f)
             self.p.log('ranking filters cost time: {}'.format(time.time()-start))
 
             self.model.get_feature = True
@@ -299,11 +306,10 @@ class PrunningFineTuner_VGG16:
             self.prunner.reset()
             self.p.log("Prunning filters.. ")
             self.model = prune_spherenet20_conv_once(self.model, prune_targets, ctx)
-            _, cur_acc = self.eval()
+            self.p.log(self.eval(False))
             self.reload_model()
             self.prunner.reset()
             self.p.log(self.model)
-            self.p.log("Pruning filter use time %.2fs" % (time.time()-start))
             message = "%.2f%s" % (
                 100*float(self.total_num_filters()) / number_of_filters, "%")
             self.p.log("Filters left"+str(message))
