@@ -351,7 +351,7 @@ def get_args():
     parser.add_argument("--model_path", type=str,
                         default="./log/train-2018-07-02_091330/model")
     parser.add_argument("--device_id", type=int, default=6)
-    parser.set_defaults(prune=True)
+    parser.set_defaults(prune=False)
     parser.set_defaults(log=True)
     args = parser.parse_args()
     return args
@@ -380,8 +380,8 @@ if __name__ == '__main__':
     time_info = time.strftime('%Y-%m-%d_%H%M%S', time.localtime(time.time()))
     log_dir = os.path.abspath("./log/")
     if not args.prune:
-        model = models.SphereNet20()
-        model.load_params('spherenet_model', ctx=ctx)
+        model = models.SphereNet20(use_custom_relu=False)
+        model.load_params('spherenet_model2', ctx=ctx)
         if args.log: log_dir = os.path.abspath("./log/train-"+time_info+"/")
     else:
         model = models.SphereNet20()
@@ -399,9 +399,9 @@ if __name__ == '__main__':
     if not args.prune:
         p.log("begin training...")
         fine_tuner.train(epoches=10)
+        fine_tuner.reload_model()
         if args.log:
             os.system("cp finetune.py "+log_dir)
-        # torch.save(model, log_dir+"model")
     else:
         model = fine_tuner.prune(rate=args.prune_rate)
         p.log(model)

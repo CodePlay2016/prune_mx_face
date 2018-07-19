@@ -1,5 +1,5 @@
 test_lfw
-spherenet_model
+spherenet_model*
 *.pyc
 log
 test.py

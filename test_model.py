@@ -192,9 +192,9 @@ if __name__ == "__main__":
     #     pickle.dump(archi_dict,f)
     with open(os.path.join(model_path2,"ModelAchi.pkl"),"rb") as f:
         archi_dict2 = pickle.load(f)
-    model1 = models.SphereNet20(archi_dict=archi_dict1)
+    model1 = models.SphereNet20(archi_dict=archi_dict1,use_custom_relu=True)
     model1.load_params(os.path.join(model_path1,"model"), ctx=ctx)
-    model2 = models.SphereNet20(archi_dict=archi_dict2)
+    model2 = models.SphereNet20(archi_dict=archi_dict2,use_custom_relu=True)
     model2.load_params(os.path.join(model_path2,"model"), ctx=ctx)
     print(test_on_LFW(model1))
     print(test_on_LFW(model2))

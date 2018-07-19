@@ -104,10 +104,10 @@ class mPReLU(HybridBlock):
             self.alpha = self.params.get('alpha', shape=(1,num_units,1,1), init=initializer)
 
     def hybrid_forward(self, F, x, alpha):
-        return F.maximum(x,0)+ F.minimum(F.broadcast_mul(alpha,x),0)
+        return F.maximum(x,0) + F.minimum(F.broadcast_mul(alpha,x),0)
 
 class Residual(HybridBlock):
-    def __init__(self, channels=(64,64), same_shape=True, **kwargs):
+    def __init__(self, channels=(64,64), same_shape=True, use_custom_relu=True, **kwargs):
         '''
         :param channels: (conv1channel, conv2channel) for conv0channel equals conv2channel
         :param same_shape:
@@ -116,15 +116,15 @@ class Residual(HybridBlock):
         super(Residual, self).__init__(**kwargs)
         self.same_shape = same_shape
         if not same_shape:
-            self.conv0 = gradcam.Conv2D(channels[1], kernel_size=3,# if no need to activations' gradient: change this to nn.Conv2D
+            self.conv0 = gradcam.Conv2D(channels[1], kernel_size=3,# if no need for activations' gradient: change this to nn.Conv2D
                                     padding=1, strides=2)
-            self.a0 = mPReLU(channels[1])
+            self.a0 = mPReLU(channels[1]) if use_custom_relu else nn.LeakyReLU(0.1)
         self.conv1 = gradcam.Conv2D(channels[0], kernel_size=3,
                                     padding=1)
-        self.a1 = mPReLU(channels[0])
+        self.a1 = mPReLU(channels[0]) if use_custom_relu else nn.LeakyReLU(0.1)
         self.conv2 = gradcam.Conv2D(channels[1], kernel_size=3,
                                     padding=1)
-        self.a2 = mPReLU(channels[1])
+        self.a2 = mPReLU(channels[1]) if use_custom_relu else nn.LeakyReLU(0.1)
 
     def hybrid_forward(self, F, x, *args, **kwargs):
         if not self.same_shape:
@@ -145,30 +145,40 @@ class SphereNet20(HybridBlock):
         6: [256]*2,
         7: [512]*2
     }
-    def __init__(self, num_classes=10574,archi_dict=None, verbose=False, **kwargs):
+    def __init__(self, num_classes=10574,archi_dict=None, verbose=False,
+                 use_custom_relu=False, **kwargs):
         super(SphereNet20, self).__init__(**kwargs)
         self.verbose = verbose
         self.num_classes=num_classes
+        self.use_custom_relu=use_custom_relu
         self.get_feature = True
         self.archi_dict = archi_dict if archi_dict else self.default_params
         # add name_scope on the outermost Sequential
         with self.name_scope():
             # block 1
             self.features = nn.HybridSequential()
-            b1 = Residual(self.archi_dict[0], same_shape=False)
+            b1 = Residual(self.archi_dict[0], same_shape=False,
+                          use_custom_relu=use_custom_relu)
 
             # block 2
-            b2_1 = Residual(self.archi_dict[1], same_shape=False)
-            b2_2 = Residual(self.archi_dict[2])
+            b2_1 = Residual(self.archi_dict[1], same_shape=False,
+                          use_custom_relu=use_custom_relu)
+            b2_2 = Residual(self.archi_dict[2],
+                          use_custom_relu=use_custom_relu)
 
             # block3
-            b3_1 = Residual(self.archi_dict[3], same_shape=False)
-            b3_2 = Residual(self.archi_dict[4])
-            b3_3 = Residual(self.archi_dict[5])
-            b3_4 = Residual(self.archi_dict[6])
+            b3_1 = Residual(self.archi_dict[3], same_shape=False,
+                          use_custom_relu=use_custom_relu)
+            b3_2 = Residual(self.archi_dict[4],
+                          use_custom_relu=use_custom_relu)
+            b3_3 = Residual(self.archi_dict[5],
+                          use_custom_relu=use_custom_relu)
+            b3_4 = Residual(self.archi_dict[6],
+                          use_custom_relu=use_custom_relu)
 
             # block 4
-            b4 = Residual(self.archi_dict[7], same_shape=False)
+            b4 = Residual(self.archi_dict[7], same_shape=False,
+                          use_custom_relu=use_custom_relu)
             f5 = nn.Dense(512)
             self.features.add(b1,b2_1,b2_2,b3_1,b3_2,b3_3,b3_4,b4,f5)
 
@@ -184,6 +194,7 @@ class SphereNet20(HybridBlock):
         if not self.get_feature:
             out = self.classifier(out)
         return out
+
     def initialize_from(self,pkl_path,ctx,*args):
         with open(pkl_path,"rb") as f:
             params = pickle.load(f)
@@ -203,19 +214,17 @@ class SphereNet20(HybridBlock):
                                                                      force_reinit=True,ctx=ctx)
                     print 'conv%d_%d.weight'%(block_index,res_index)
                     resblock.a0.initialize(init=mx.init.Constant(params['relu%d_%d'%(block_index,res_index)][0].reshape([1,-1,1,1])),
-                                       force_reinit=True, ctx=ctx)
+                                    force_reinit=True, ctx=ctx)
                     res_index += 1
                 resblock.conv1.initialize(init=myInitializer(params['conv%d_%d.weight'%(block_index,res_index)],
                                                              params['conv%d_%d.bias'%(block_index,res_index)]),ctx=ctx)
                 resblock.a1.initialize(init=mx.init.Constant(params['relu%d_%d' % (block_index, res_index)][0].reshape([1,-1,1,1])),
                                        force_reinit=True, ctx=ctx)
-                print 'conv%d_%d.weight'%(block_index,res_index)
                 res_index += 1
                 resblock.conv2.initialize(init=myInitializer(params['conv%d_%d.weight'%(block_index,res_index)],
                                                              params['conv%d_%d.bias' % (block_index, res_index)]),ctx=ctx)
                 resblock.a2.initialize(init=mx.init.Constant(params['relu%d_%d' % (block_index, res_index)][0].reshape([1,-1,1,1])),
                                        force_reinit=True,  ctx=ctx)
-                print 'conv%d_%d.weight'%(block_index,res_index)
                 res_index += 1
 
         weight = nd.L2Normalization(
@@ -223,7 +232,7 @@ class SphereNet20(HybridBlock):
         self.classifier.initialize(init=mx.init.Constant(weight),ctx=ctx)
 
 def init_model(pkl_path):
-    mnet = SphereNet20()
+    mnet = SphereNet20(use_custom_relu=False)
     mnet.initialize_from(pkl_path, mx.gpu())
     train_data_loader, valid_data_loader, test_data_loader \
         = dataset.train_valid_test_loader("../pytorch-pruning/train", batch_size=16)
@@ -236,7 +245,7 @@ def init_model(pkl_path):
         criterion = AngleLoss()
         loss = criterion(out[0],out[1],label)
         break
-    mnet.save_params("./spherenet_model")
+    mnet.save_params("./spherenet_model2")
     return mnet
 
 def load_model():
